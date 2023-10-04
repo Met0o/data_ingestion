@@ -1,5 +1,3 @@
-# data-ml
-
 Database deployment and configuration codebase
 
 ## Prerequisites
