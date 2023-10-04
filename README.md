@@ -1,4 +1,4 @@
-Database deployment and configuration codebase
+Postgres database deployment and configuration codebase
 
 ## Prerequisites
 
