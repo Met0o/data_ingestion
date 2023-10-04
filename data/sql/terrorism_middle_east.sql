@@ -1,0 +1,37 @@
+-- external_data.terrorism_middle_east source
+
+CREATE OR REPLACE VIEW external_data.terrorism_middle_east
+AS SELECT global_terrorism_db.country_txt AS country,
+    global_terrorism_db.country_code,
+    global_terrorism_db.eventdate,
+    global_terrorism_db.region_txt AS region,
+    global_terrorism_db.provstate,
+    global_terrorism_db.city,
+    global_terrorism_db.latitude,
+    global_terrorism_db.longitude,
+    global_terrorism_db.location,
+    global_terrorism_db.summary,
+    global_terrorism_db.attacktype1_txt AS attack_type_1,
+    global_terrorism_db.attacktype2_txt AS attack_type_2,
+    global_terrorism_db.targtype1_txt AS target_type,
+    global_terrorism_db.targsubtype1_txt AS target_subtype_1,
+    global_terrorism_db.targsubtype2_txt AS target_subtype_2,
+    global_terrorism_db.corp1,
+    global_terrorism_db.target1,
+    global_terrorism_db.natlty1_txt AS nationality,
+    global_terrorism_db.corp2,
+    global_terrorism_db.target2,
+    global_terrorism_db.gname,
+    global_terrorism_db.motive,
+    global_terrorism_db.weaptype1_txt AS weapon_type,
+    global_terrorism_db.weapdetail AS weapon_detail,
+    global_terrorism_db.nkill AS number_killed,
+    global_terrorism_db.nwound AS number_wounded,
+    global_terrorism_db.propcomment,
+    global_terrorism_db.addnotes,
+    global_terrorism_db.scite1,
+    global_terrorism_db.scite2,
+    global_terrorism_db.scite3,
+    global_terrorism_db.dbsource
+   FROM external_data.global_terrorism_db
+  WHERE global_terrorism_db.country_txt = ANY (ARRAY['Saudi Arabia'::text, 'United Arab Emirates'::text, 'Bahrain'::text, 'Kuwait'::text, 'Qatar'::text, 'Oman'::text]);

@@ -5,18 +5,13 @@ import requests
 import psycopg2
 import knoema
 
-from PyPDF2 import PdfReader
 from psycopg2.extras import execute_values
 from tqdm import tqdm
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from utils import sheets_to_dataframe, extract_gti_data
 
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.DEBUG, 
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("app.log"),
@@ -24,86 +19,50 @@ logging.basicConfig(
     ]
 )
 
-def sheets_to_dataframe(spreadsheet_id, range_name):
-    
-    """Retrieve data from a Google Sheets file and create a Pandas DataFrame.
-
-    Args:
-        spreadsheet_id (str): The ID of the Google Sheets file.
-        range_name (str): The name of the sheet and range to retrieve, e.g. 'Sheet1!A1:ZZ'.
-
-    Returns:
-        A Pandas DataFrame containing the data from the specified range.
-    """
-    
-    creds = None
-    SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    
-    if os.path.exists('data/token.json'):
-        creds = Credentials.from_authorized_user_file('data/token.json', SCOPES)
-        
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'data/credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('data/token.json', 'w') as token:
-            token.write(creds.to_json())
-
-    service = build('sheets', 'v4', credentials=creds)
-
-    sheet = service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
-    values = result.get('values', [])
-
-    if not values:
-        return None
-    else:
-        num_rows = len(values)
-        num_cols = max(len(row) for row in values)
-        column_names = [f'Column {i}' for i in range(1, num_cols + 1)]
-        
-        df = pd.DataFrame(index=range(1, num_rows + 1), columns=column_names)
-        
-        for i, row in enumerate(values):
-            for j, value in enumerate(row):
-                df.iloc[i, j] = value
-                
-        return df
-
-def extract_gti_data(pages):
+class SQLModulator:
     
     """
-    Extracts data from Global Terrorism Index 2022 PDF report.
+    A class for executing an SQL script from a file to modify data within a PostgreSQL database.
 
-    Args:
-        pages: A list of page numbers to extract data from.
+    Attributes:
+        host (str): The host name or IP address of the PostgreSQL server.
+        port (str): The port number of the PostgreSQL server.
+        dbname (str): The name of the database to connect to.
+        user (str): The username for the PostgreSQL account.
+        password (str): The password for the PostgreSQL account.
+        sql_file_path (str): The path to the SQL script file.
 
-    Returns:
-        A pandas dataframe containing the extracted data with the following columns:
-            * GTI_Rank: The rank of the country based on the Global Terrorism Index score.
-            * Country: The name of the country.
-            * GTI_Score_2021: The Global Terrorism Index score of the country in 2021.
-            * ChangeInScore_2020_2021: The change in the Global Terrorism Index score of the country from 2020 to 2021.
+    Methods:
+        execute_sql_from_file(): Reads the SQL script from the specified file and executes it on the connected PostgreSQL database.
     """
     
-    reader = PdfReader("data/GTI-2022-web.pdf")
-    data = []
-    for page_number in pages:
-        page = reader.pages[page_number]
-        text = page.extract_text()
-        lines = text.split("\n")
-        headers = [header.strip() for header in lines[2].split()]
-        for line in lines[3:]:
-            try:
-                rank, country, score, change = line.split()
-                data.append([rank, country, score, change])
-            except ValueError:
-                continue
-            
-    return pd.DataFrame(data, columns=['GTI_Rank', 'Country', 'GTI_Score_2021', 'ChangeInScore_2020_2021'])
+    def __init__(self, host, port, dbname, user, password, sql_file_path):
+        self.host = host
+        self.port = port
+        self.dbname = dbname
+        self.user = user
+        self.password = password
+        self.sql_file_path = sql_file_path
+
+    def execute_sql_from_file(self):
+        
+        logging.info("Connecting to database...")
+        with psycopg2.connect(
+            host=self.host,
+            database=self.dbname,
+            user=self.user,
+            password=self.password,
+            port=self.port
+        ) as conn:
+            logging.info("Reading SQL script file...")
+            with open(self.sql_file_path, 'r') as file:
+                sql_script = file.read()
+
+            logging.info("Executing SQL script...")
+            with conn.cursor() as cur:
+                cur.execute(sql_script)
+                conn.commit()
+                logging.info("SQL script executed successfully.")
 
 class BaseDataLoader:
     
@@ -172,16 +131,22 @@ class GoogleSheetsDataLoader(BaseDataLoader):
             if 'acronyms' in self.table_name:
                 
                 df = sheets_to_dataframe(spreadsheet_id, range_name)
-                df = df.iloc[3:].iloc[:, 1:].rename(columns={'Column 2': 'Term', 'Column 3': 'Overview', 'Column 4': 'Description', 'Column 5': 'Notes'})
+                df = df.iloc[3:].iloc[:, 1:].rename(columns={'Column 2': 'Term', 'Column 3': 'Overview', 'Column 4': 'Description', 'Column 5': 'Selected', 'Column 6': 'Notes'})
                 
-                create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (Term text, Overview text, Description text, Notes text);"
-            
+                logging.debug(df.head())
+                logging.debug(df.shape)
+                            
+                create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (Term text, Overview text, Description text, Selected text, Notes text);"
+                
             elif 'project_assets' in self.table_name:
                 
                 df = sheets_to_dataframe(spreadsheet_id, range_name)
-                df = df.iloc[2:].iloc[:, 1:].rename(columns={'Column 2': 'Master_Asset_List', 'Column 3': 'scope', 'Column 4': 'hotel', 'Column 5': 'notes'})
+                df = df.iloc[1:].iloc[:, 1:].rename(columns={'Column 2': 'Master_Asset_List', 'Column 3': 'scope', 'Column 4': 'hotel', 'Column 5': 'notes'})
                 
-                create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (Master_Asset_List text, Scope text, Hotel text, notes text);"
+                logging.debug(df.head())
+                logging.debug(df.shape)
+                
+                create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (Master_Asset_List text, Scope text, Hotel text, Notes text);"
             
             else:
                 raise ValueError("Invalid table or column names.")
@@ -211,8 +176,8 @@ class GoogleSheetsDataLoader(BaseDataLoader):
                         logging.info("Loading data into db...")
                         with tqdm(total=len(df)) as pbar:
                             execute_values(cur, f"INSERT INTO {self.schema_name}.{self.table_name} VALUES %s", df.values.tolist(), page_size=50000)
+                            conn.commit()
                             pbar.update(len(df))
-                            
                     except Exception as e:
                         logging.error(f"Error creating table: {e}")
                         conn.rollback()
@@ -351,8 +316,7 @@ class KnoemaDataLoader(BaseDataLoader):
     def __init__(self, host, port, dbname, user, password, schema_name, table_name):
         super().__init__(host, port, dbname, user, password, schema_name, table_name)
 
-    def load_data(self, api_call, *id_vars):
-        
+    def load_data(self, api_call, *id_vars):        
         """
         Loads data from the Knoema API into a PostgreSQL database.
 
@@ -375,7 +339,7 @@ class KnoemaDataLoader(BaseDataLoader):
             df = knoema.get(api_call)
             df = df.transpose().reset_index()
             df.columns = df.columns.get_level_values(0)
-            df = pd.melt(df, id_vars=id_vars, var_name='Date', value_name='Value')
+            df = pd.melt(df, id_vars=list(id_vars), var_name='Date', value_name='Value')
             df['Date'] = pd.to_datetime(df['Date'], format='%Y-%m-%d')
             
             if 'knoema_burglary' in self.table_name:
@@ -434,7 +398,6 @@ class KnoemaDataLoader(BaseDataLoader):
             logging.error(f"Error connecting to database: {e}")
             return
 
-   
 class TerrorismDataLoader(BaseDataLoader):
     
     """
@@ -510,28 +473,28 @@ class GTIDataLoader(BaseDataLoader):
     def __init__(self, host, port, dbname, user, password, schema_name, table_name):
         super().__init__(host, port, dbname, user, password, schema_name, table_name)
 
-    def load_data(self, data_path):
+    def load_data(self, file_path, pages):
         
         """
         Loads GTI data from a PDF file into a PostgreSQL database.
 
         Args:
-            data_path (str): The path to the PDF file containing the GTI data.
+            file_path (str): The path to the PDF file containing the GTI data.
+            pages (int): The pages that should be scraped from the PDF file.
 
         Returns:
             None
         """
-        
-        logging.info(f"Loading data from PDF file: {data_path}")
+        logging.info(f"Loading data from PDF file: {file_path}")
         try:
-            df1 = extract_gti_data([85])
-            df2 = extract_gti_data([86])
+            df1 = extract_gti_data(file_path, pages[:1])
+            df2 = extract_gti_data(file_path, pages[1:])
             df = pd.concat([df1, df2], ignore_index=True)
-            df['ChangeInScore_2020_2021'] = df['ChangeInScore_2020_2021'].apply(lambda x: x.replace('GTI', '') if isinstance(x, str) else x)
+            df['ChangeInScore_YoY'] = df['ChangeInScore_YoY'].apply(lambda x: x.replace('GTI', '') if isinstance(x, str) else x)
             
         except Exception as e:
-            logging.error(f"Error loading data: {e}")
-            return
+             logging.error(f"Error loading data: {e}")
+             return
 
         logging.info("Connecting to database...")
         try:
@@ -547,7 +510,7 @@ class GTIDataLoader(BaseDataLoader):
                         conn.commit()
                         
                         logging.info("Creating table...")
-                        create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (GTI_Rank integer, Country text, GTI_Score_2021 double precision, ChangeInScore_2020_2021 double precision)"
+                        create_query = f"CREATE TABLE {self.schema_name}.{self.table_name} (GTI_Rank integer, Country text, GTI_Score double precision, ChangeInScore_YoY double precision)"
                         cur.execute(create_query)
                         conn.commit()
 
@@ -672,6 +635,15 @@ class DataLoader:
                 conn.rollback()
                 return
         
+        if self.table_name.startswith('earthquake'):
+            try:
+                logging.info("Converting datetime column to date format...")
+                df = df.drop(df.columns[[0]], axis=1)
+            except Exception as e:
+                logging.error(f"Error converting column type: {e}")
+                conn.rollback()
+                return
+        
         logging.info("Connecting to database...")
         try:
             with psycopg2.connect(host=self.host, port=self.port, database=self.dbname, user=self.user, password=self.password) as conn:
@@ -703,6 +675,14 @@ class DataLoader:
                     if self.table_name == "global_terrorism_db":
                         try:
                             TerrorismDataLoader(self.host, self.port, self.dbname, self.user, self.password, self.schema_name, self.table_name).post_load(conn, cur, df)
+                        except Exception as e:
+                            logging.error(f"Error updating table: {e}")
+                            conn.rollback()
+                            return
+                        
+                    if self.table_name == "earthquake_data":
+                        try:
+                            cur.execute(f"ALTER TABLE {self.schema_name}.{self.table_name} ALTER COLUMN datetime TYPE timestamp USING datetime::timestamptz")
                         except Exception as e:
                             logging.error(f"Error updating table: {e}")
                             conn.rollback()
